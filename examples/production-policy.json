@@ -1,0 +1,29 @@
+{
+  "schema_version": "1.0.0",
+  "name": "production",
+  "environments": ["production"],
+  "assurance": {
+    "provider": "skil",
+    "minimum_version": "0.6.0",
+    "maximum_age": "168h",
+    "require_complete": true
+  },
+  "signatures": {
+    "required": true,
+    "trusted_identities": ["trusted-ci"]
+  },
+  "capabilities": {
+    "deny": ["arbitrary_shell", "unrestricted_network", "unrestricted_secret_access"],
+    "approval_required": ["filesystem_write", "external_api"]
+  },
+  "provenance": {"required": true},
+  "risk": {"maximum": "medium"},
+  "runtime": {
+    "allowed_commands": ["git", "go"],
+    "allowed_secrets": [],
+    "allow_workspace_write": false,
+    "allow_network": false,
+    "timeout_seconds": 120,
+    "max_output_bytes": 1048576
+  }
+}

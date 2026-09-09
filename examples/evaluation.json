@@ -1,0 +1,23 @@
+{
+  "subject": {
+    "name": "example-skill",
+    "version": "1.0.0",
+    "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "environment": "production",
+  "evidence": {
+    "schema_version": "1.0.0",
+    "subject_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "provider": "skil",
+    "provider_version": "0.6.0",
+    "completed_at": "2026-09-09T12:00:00Z",
+    "complete": true,
+    "passed": true,
+    "signature_verified": true,
+    "signer_identity": "trusted-ci",
+    "provenance_verified": true,
+    "risk": "low",
+    "capabilities": ["filesystem_read"]
+  },
+  "approvals": []
+}
