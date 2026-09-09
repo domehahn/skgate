@@ -16,6 +16,7 @@ import (
 
 	"github.com/domehahn/skgate/internal/admission"
 	"github.com/domehahn/skgate/internal/api"
+	"github.com/domehahn/skgate/internal/auth"
 	"github.com/domehahn/skgate/internal/policy"
 	"github.com/domehahn/skgate/internal/store"
 )
@@ -92,7 +93,9 @@ func runEvaluate(args []string) error {
 	pp := fs.String("policy", "", "policy JSON")
 	in := fs.String("input", "", "evaluation request JSON")
 	out := fs.String("output", "", "output file (default stdout)")
-	dd := fs.String("data-dir", "./data", "data directory for revocation checks")
+	dd := fs.String("data-dir", "./data", "data directory for file store")
+	storage := fs.String("storage", "file", "storage engine (file, postgres)")
+	dsn := fs.String("dsn", "", "database DSN connection string for postgres engine")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -112,13 +115,16 @@ func runEvaluate(args []string) error {
 		return err
 	}
 
-	st, _ := store.NewFileStore(*dd)
+	st, _ := store.NewStore(*storage, *dd, *dsn)
 	evaluator := admission.New(p)
 	if st != nil {
 		evaluator = evaluator.WithRevocations(st)
 	}
 
 	d := evaluator.Evaluate(req)
+	if st != nil {
+		_ = st.SaveDecision(d)
+	}
 	enc, _ := json.MarshalIndent(d, "", "  ")
 	enc = append(enc, '\n')
 	if *out != "" {
@@ -155,26 +161,29 @@ func runDoctor(args []string) error {
 
 func runPromote(args []string) error {
 	fs := flag.NewFlagSet("promote", flag.ContinueOnError)
+	decisionID := fs.String("decision-id", "", "decision_id of prior ALLOW admission decision (required)")
 	digest := fs.String("digest", "", "artifact digest (sha256:<hex>)")
 	env := fs.String("env", "", "target environment")
 	by := fs.String("by", "cli", "promoted by user/service")
 	reason := fs.String("reason", "", "promotion reason")
 	dd := fs.String("data-dir", "./data", "data directory")
+	storage := fs.String("storage", "file", "storage engine (file, postgres)")
+	dsn := fs.String("dsn", "", "database DSN for postgres engine")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if *digest == "" || *env == "" {
-		return errors.New("--digest and --env are required")
+	if *decisionID == "" || *digest == "" || *env == "" {
+		return errors.New("--decision-id, --digest, and --env are required")
 	}
-	st, err := store.NewFileStore(*dd)
+	st, err := store.NewStore(*storage, *dd, *dsn)
 	if err != nil {
 		return err
 	}
-	p := store.Promotion{Digest: *digest, Environment: *env, PromotedBy: *by, Reason: *reason}
+	p := store.Promotion{DecisionID: *decisionID, Digest: *digest, Environment: *env, PromotedBy: *by, Reason: *reason}
 	if err := st.Promote(p); err != nil {
 		return err
 	}
-	fmt.Printf("promoted digest %s to environment %q\n", *digest, *env)
+	fmt.Printf("promoted digest %s (decision %s) to environment %q\n", *digest, *decisionID, *env)
 	return nil
 }
 
@@ -185,13 +194,15 @@ func runRevoke(args []string) error {
 	by := fs.String("by", "cli", "revoked by user/service")
 	reason := fs.String("reason", "", "revocation reason")
 	dd := fs.String("data-dir", "./data", "data directory")
+	storage := fs.String("storage", "file", "storage engine (file, postgres)")
+	dsn := fs.String("dsn", "", "database DSN for postgres engine")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if *digest == "" {
 		return errors.New("--digest is required")
 	}
-	st, err := store.NewFileStore(*dd)
+	st, err := store.NewStore(*storage, *dd, *dsn)
 	if err != nil {
 		return err
 	}
@@ -207,10 +218,12 @@ func runPromotions(args []string) error {
 	fs := flag.NewFlagSet("promotions", flag.ContinueOnError)
 	env := fs.String("env", "", "filter by environment")
 	dd := fs.String("data-dir", "./data", "data directory")
+	storage := fs.String("storage", "file", "storage engine (file, postgres)")
+	dsn := fs.String("dsn", "", "database DSN for postgres engine")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	st, err := store.NewFileStore(*dd)
+	st, err := store.NewStore(*storage, *dd, *dsn)
 	if err != nil {
 		return err
 	}
@@ -227,10 +240,12 @@ func runRevocations(args []string) error {
 	fs := flag.NewFlagSet("revocations", flag.ContinueOnError)
 	env := fs.String("env", "", "filter by environment")
 	dd := fs.String("data-dir", "./data", "data directory")
+	storage := fs.String("storage", "file", "storage engine (file, postgres)")
+	dsn := fs.String("dsn", "", "database DSN for postgres engine")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	st, err := store.NewFileStore(*dd)
+	st, err := store.NewStore(*storage, *dd, *dsn)
 	if err != nil {
 		return err
 	}
@@ -247,13 +262,15 @@ func runBackup(args []string) error {
 	fs := flag.NewFlagSet("backup", flag.ContinueOnError)
 	dd := fs.String("data-dir", "./data", "data directory")
 	out := fs.String("out", "", "output backup file path")
+	storage := fs.String("storage", "file", "storage engine (file, postgres)")
+	dsn := fs.String("dsn", "", "database DSN for postgres engine")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if *out == "" {
 		return errors.New("--out backup file path is required")
 	}
-	st, err := store.NewFileStore(*dd)
+	st, err := store.NewStore(*storage, *dd, *dsn)
 	if err != nil {
 		return err
 	}
@@ -268,6 +285,8 @@ func runRestore(args []string) error {
 	fs := flag.NewFlagSet("restore", flag.ContinueOnError)
 	dd := fs.String("data-dir", "./data", "data directory")
 	in := fs.String("in", "", "input backup file path")
+	storage := fs.String("storage", "file", "storage engine (file, postgres)")
+	dsn := fs.String("dsn", "", "database DSN for postgres engine")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -278,7 +297,7 @@ func runRestore(args []string) error {
 	if err != nil {
 		return err
 	}
-	st, err := store.NewFileStore(*dd)
+	st, err := store.NewStore(*storage, *dd, *dsn)
 	if err != nil {
 		return err
 	}
@@ -290,6 +309,10 @@ func runServe(args []string) error {
 	pp := fs.String("policy", "", "policy JSON")
 	addr := fs.String("addr", ":8081", "listen address")
 	dd := fs.String("data-dir", "./data", "data directory")
+	storage := fs.String("storage", getEnvOrDefault("SKGATE_STORAGE_ENGINE", "file"), "storage engine (file, postgres)")
+	dsn := fs.String("dsn", os.Getenv("SKGATE_STORAGE_DSN"), "database DSN for postgres engine")
+	issuer := fs.String("oidc-issuer", os.Getenv("SKGATE_OIDC_ISSUER"), "expected OIDC JWT issuer (iss)")
+	audience := fs.String("oidc-audience", os.Getenv("SKGATE_OIDC_AUDIENCE"), "expected OIDC JWT audience (aud)")
 	prod := fs.Bool("production", false, "fail closed on missing auth")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -301,12 +324,17 @@ func runServe(args []string) error {
 	if err != nil {
 		return err
 	}
-	st, err := store.NewFileStore(*dd)
+	st, err := store.NewStore(*storage, *dd, *dsn)
 	if err != nil {
 		return err
 	}
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	srvAPI := api.New(admission.New(p), st, os.Getenv("SKGATE_API_TOKEN"), *prod, logger)
+	if *issuer != "" || *audience != "" {
+		authenticator := auth.NewAuthenticator(os.Getenv("SKGATE_API_TOKEN"), nil).WithIssuer(*issuer).WithAudience(*audience)
+		srvAPI.WithAuthenticator(authenticator)
+	}
+
 	srv := &http.Server{
 		Addr:              *addr,
 		Handler:           srvAPI.Handler(),
@@ -317,7 +345,7 @@ func runServe(args []string) error {
 	}
 	errCh := make(chan error, 1)
 	go func() {
-		logger.Info("skgate listening", "addr", *addr, "production", *prod)
+		logger.Info("skgate listening", "addr", *addr, "production", *prod, "storage", *storage)
 		errCh <- srv.ListenAndServe()
 	}()
 	sig := make(chan os.Signal, 1)
@@ -333,6 +361,13 @@ func runServe(args []string) error {
 		}
 		return err
 	}
+}
+
+func getEnvOrDefault(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
 }
 
 // Kept local to avoid leaking context setup throughout CLI code.

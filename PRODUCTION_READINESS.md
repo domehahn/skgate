@@ -1,28 +1,12 @@
 # Production Readiness
 
-Status: **FULL ENTERPRISE PASS**
+Status: **FAIL / NOT YET ENTERPRISE PASS** (Score: 55/100)
 
-Implemented and tested:
-- deterministic policy evaluation
-- immutable SHA-256 artifact binding
-- evidence freshness/version checks
-- signer allowlist policy
-- provenance requirement policy
-- risk and capability gates
-- approval-required outcome
-- fail-closed production API authentication configuration
-- bounded request bodies
-- stable JSON decision/reason model
-- fsync-backed append-only decision audit records
-- health/readiness/metrics endpoints
-- structured logging
-- HTTP timeouts and graceful shutdown
-- zero third-party runtime dependencies
-- PostgreSQL-backed durable state and embedded migrations
-- real cryptographic DSSE/Sigstore/GitHub Attestation verification inside the trust boundary
-- RBAC/OIDC workload identity & Bearer token authorization
-- promotion/revocation persistence APIs & CLI commands
-- backup/restore state CLI commands & test suite
-- multi-replica consistency test suite
-- current/stable `skil`, `skpm`, and SkillForge interop lifecycle contract test suite
-- signed release provenance and SPDX 2.3 SBOM automation
+`skgate` has a solid architectural core (deterministic digest binding, 4 decision states, policy loading, audit records, and basic API endpoints), but several P0 trust boundary, persistence, and identity verification gaps must be resolved before enterprise production certification:
+
+1. **Trust Boundary (P0)**: Evidence must not be self-asserted via client boolean flags (`signature_verified`, `provenance_verified`). Signature and provenance verification must be cryptographically performed inside the trust boundary or fail-closed (`SKGATE-SIGNATURE-UNVERIFIED` / `SKGATE-PROVENANCE-UNVERIFIED`). Loose `strings.Contains()` signer identity matching must be replaced with exact identity matching.
+2. **Fail-Closed Revocation (P0)**: Revocation status determination errors (e.g. database disconnect) must fail closed with `SKGATE-REVOCATION-STATE-UNAVAILABLE` (DENY), never fail open.
+3. **Decision-Bound Promotion (P0)**: Promotion endpoints must require a valid prior `decision_id` proving an `ALLOW` decision for the exact digest and target environment.
+4. **Storage Engine Wiring (P0)**: PostgreSQL storage engine (`--storage postgres --dsn ...`) must be fully wired to `skgate serve` and CLI commands. The `/readyz` endpoint must probe storage connectivity (`Ping()`), migration status, and policy validity.
+5. **OIDC Workload Identity (P1)**: JWT validation must enforce `iss` (issuer), `aud` (audience), JWKS key verification, and clock skew tolerance.
+6. **Remote CI & Release Automation (P1)**: GitHub Actions workflows (`ci.yml`, `release.yml`) and reproducible release provenance must be established.

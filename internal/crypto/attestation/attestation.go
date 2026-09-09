@@ -146,7 +146,7 @@ func (v *Verifier) VerifySigstore(bundle SigstoreBundle, artifactDigest string, 
 		matched := false
 		for _, certId := range certIdentities {
 			for _, trustedId := range trustedIdentities {
-				if certId == trustedId || strings.Contains(certId, trustedId) {
+				if certId == trustedId {
 					matched = true
 					break
 				}

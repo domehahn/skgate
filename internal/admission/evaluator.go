@@ -79,10 +79,12 @@ func (e Evaluator) Evaluate(req EvaluationRequest) Decision {
 		deny("SKGATE-EVIDENCE-SUBJECT-MISMATCH", "evidence is not bound to the requested artifact digest")
 	}
 
-	// Check Revocation Status
+	// Check Revocation Status - FAIL CLOSED if storage/lookup fails
 	if e.Revocations != nil {
 		revoked, err := e.Revocations.IsRevoked(req.Subject.Digest, req.Environment)
-		if err == nil && revoked {
+		if err != nil {
+			deny("SKGATE-REVOCATION-STATE-UNAVAILABLE", fmt.Sprintf("cannot determine revocation status: %v", err))
+		} else if revoked {
 			deny("SKGATE-DIGEST-REVOKED", "artifact digest has been revoked for this environment")
 		}
 	}
@@ -110,26 +112,38 @@ func (e Evaluator) Evaluate(req EvaluationRequest) Decision {
 			reassess("SKGATE-ASSURANCE-STALE", "assurance evidence is older than policy allows")
 		}
 	}
+
+	// Signature verification: Require real cryptographic evidence payloads inside trust boundary
 	if e.Policy.Signatures.Required {
 		if req.Evidence.SigstoreBundle != nil {
 			if err := e.Verifier.VerifySigstore(*req.Evidence.SigstoreBundle, req.Subject.Digest, e.Policy.Signatures.TrustedIdentities); err != nil {
 				deny("SKGATE-SIGSTORE-INVALID", err.Error())
 			}
-		} else if !req.Evidence.SignatureVerified {
-			deny("SKGATE-SIGNATURE-INVALID", "verified signature is required")
-		} else if !slices.Contains(e.Policy.Signatures.TrustedIdentities, req.Evidence.SignerIdentity) {
-			deny("SKGATE-SIGNER-UNTRUSTED", "signer identity is not trusted by policy")
+		} else if req.Evidence.DSSEEnvelope != nil && len(e.Policy.Signatures.TrustedIdentities) > 0 {
+			if err := e.Verifier.VerifyDSSE(*req.Evidence.DSSEEnvelope, e.Policy.Signatures.TrustedIdentities[0]); err != nil {
+				deny("SKGATE-DSSE-INVALID", err.Error())
+			}
+		} else {
+			deny("SKGATE-SIGNATURE-UNVERIFIED", "signature verification requires valid cryptographic payload (SigstoreBundle or DSSEEnvelope)")
 		}
 	}
+
+	// Provenance verification: Require real cryptographic attestation payloads inside trust boundary
 	if e.Policy.Provenance.Required {
 		if req.Evidence.GitHubAttestation != nil {
 			if err := e.Verifier.VerifyGitHubAttestation(*req.Evidence.GitHubAttestation, req.Subject.Digest); err != nil {
 				deny("SKGATE-PROVENANCE-INVALID", err.Error())
 			}
-		} else if !req.Evidence.ProvenanceVerified {
-			deny("SKGATE-PROVENANCE-MISSING", "verified provenance is required")
+		} else if req.Evidence.DSSEEnvelope != nil {
+			// DSSE in-toto provenance statement payload
+			if req.Evidence.DSSEEnvelope.PayloadType != "application/vnd.in-toto+json" {
+				deny("SKGATE-PROVENANCE-INVALID", "dsse envelope payloadType must be application/vnd.in-toto+json")
+			}
+		} else {
+			deny("SKGATE-PROVENANCE-UNVERIFIED", "provenance verification requires valid cryptographic attestation payload (GitHubAttestation or DSSEEnvelope)")
 		}
 	}
+
 	if riskRank(req.Evidence.Risk) > riskRank(e.Policy.Risk.Maximum) {
 		deny("SKGATE-RISK-TOO-HIGH", fmt.Sprintf("risk %s exceeds maximum %s", req.Evidence.Risk, e.Policy.Risk.Maximum))
 	}

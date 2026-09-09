@@ -50,6 +50,18 @@ func (s *Server) Handler() http.Handler {
 		_, _ = w.Write([]byte("ok\n"))
 	})
 	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, r *http.Request) {
+		if s.store != nil {
+			if err := s.store.Ping(); err != nil {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				_, _ = w.Write([]byte(fmt.Sprintf("not ready: store error: %v\n", err)))
+				return
+			}
+		}
+		if err := s.evaluator.Policy.Validate(); err != nil {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte(fmt.Sprintf("not ready: policy invalid: %v\n", err)))
+			return
+		}
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ready\n"))
 	})
@@ -132,8 +144,8 @@ func (s *Server) promote(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "SKGATE-PROMOTION-INVALID", err.Error())
 		return
 	}
-	if p.Digest == "" || p.Environment == "" {
-		writeErr(w, 400, "SKGATE-PROMOTION-INVALID", "digest and environment are required")
+	if p.DecisionID == "" || p.Digest == "" || p.Environment == "" {
+		writeErr(w, 400, "SKGATE-PROMOTION-INVALID", "decision_id, digest, and environment are required")
 		return
 	}
 	if err := s.store.Promote(p); err != nil {

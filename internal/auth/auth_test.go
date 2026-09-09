@@ -30,10 +30,11 @@ func TestHMACJWTAuth(t *testing.T) {
 
 	header := JWTHeader{Alg: "HS256", Typ: "JWT"}
 	claims := JWTClaims{
-		Issuer:  "https://auth.example.com",
-		Subject: "workload-1",
-		Expiry:  time.Now().Add(time.Hour).Unix(),
-		Role:    RolePromoter,
+		Issuer:   "https://auth.example.com",
+		Subject:  "workload-1",
+		Audience: "skgate-api",
+		Expiry:   time.Now().Add(time.Hour).Unix(),
+		Role:     RolePromoter,
 	}
 
 	hBytes, _ := json.Marshal(header)
@@ -51,6 +52,43 @@ func TestHMACJWTAuth(t *testing.T) {
 	role, err := auth.Authenticate("Bearer " + jwtToken)
 	if err != nil || role != RolePromoter {
 		t.Fatalf("expected promoter role, got %v, err=%v", role, err)
+	}
+}
+
+func TestOIDCIssuerAndAudienceValidation(t *testing.T) {
+	secret := []byte("super-secret-key")
+	auth := NewAuthenticator("", secret).WithIssuer("https://issuer.example.com").WithAudience("skgate-production")
+
+	makeToken := func(iss, aud string) string {
+		header := JWTHeader{Alg: "HS256", Typ: "JWT"}
+		claims := JWTClaims{
+			Issuer:   iss,
+			Audience: aud,
+			Subject:  "workload",
+			Expiry:   time.Now().Add(time.Hour).Unix(),
+			Role:     RoleEvaluator,
+		}
+		hBytes, _ := json.Marshal(header)
+		cBytes, _ := json.Marshal(claims)
+		unsigned := base64.RawURLEncoding.EncodeToString(hBytes) + "." + base64.RawURLEncoding.EncodeToString(cBytes)
+		mac := hmac.New(sha256.New, secret)
+		mac.Write([]byte(unsigned))
+		return unsigned + "." + base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+	}
+
+	// 1. Valid token
+	if _, err := auth.Authenticate("Bearer " + makeToken("https://issuer.example.com", "skgate-production")); err != nil {
+		t.Fatalf("expected valid token authentication: %v", err)
+	}
+
+	// 2. Mismatched Issuer
+	if _, err := auth.Authenticate("Bearer " + makeToken("https://attacker.example.com", "skgate-production")); err == nil {
+		t.Fatal("expected error for issuer mismatch")
+	}
+
+	// 3. Mismatched Audience
+	if _, err := auth.Authenticate("Bearer " + makeToken("https://issuer.example.com", "wrong-aud")); err == nil {
+		t.Fatal("expected error for audience mismatch")
 	}
 }
 

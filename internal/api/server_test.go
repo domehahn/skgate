@@ -48,8 +48,38 @@ func TestPromotionAndRevocationAPIs(t *testing.T) {
 	s := New(admission.New(p), st, "admin-token", true, slog.New(slog.NewTextHandler(os.Stderr, nil)))
 	s.authenticator.RegisterAPIToken("promo-token", auth.RolePromoter)
 
-	// 1. Promote digest
+	// 0. Perform valid ALLOW evaluation first
+	evalReq := admission.EvaluationRequest{
+		Subject: admission.ArtifactSubject{
+			Name:    "skill",
+			Version: "1.0.0",
+			Digest:  "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		},
+		Environment: "prod",
+		Evidence: admission.Evidence{
+			SubjectDigest:   "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			Provider:        "skil",
+			ProviderVersion: "0.6.0",
+			Passed:          true,
+			Complete:        true,
+			Risk:            "low",
+		},
+	}
+	bEval, _ := json.Marshal(evalReq)
+	reqEval := httptest.NewRequest(http.MethodPost, "/api/v1/evaluate", bytes.NewReader(bEval))
+	reqEval.Header.Set("Authorization", "Bearer admin-token")
+	rrEval := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rrEval, reqEval)
+
+	var dec admission.Decision
+	_ = json.Unmarshal(rrEval.Body.Bytes(), &dec)
+	if dec.Decision != admission.Allow {
+		t.Fatalf("expected initial evaluation ALLOW, got %s", dec.Decision)
+	}
+
+	// 1. Promote digest bound to decision_id
 	promoReq := store.Promotion{
+		DecisionID:  dec.DecisionID,
 		Digest:      "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 		Environment: "prod",
 		PromotedBy:  "alice",
@@ -80,32 +110,16 @@ func TestPromotionAndRevocationAPIs(t *testing.T) {
 		t.Fatalf("expected 201 Created, got %d body=%s", rr2.Code, rr2.Body.String())
 	}
 
-	// 3. Verify Revocation causes evaluation DENY
-	evalReq := admission.EvaluationRequest{
-		Subject: admission.ArtifactSubject{
-			Name:    "skill",
-			Version: "1.0.0",
-			Digest:  "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-		},
-		Environment: "prod",
-		Evidence: admission.Evidence{
-			SubjectDigest:   "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-			Provider:        "skil",
-			ProviderVersion: "0.6.0",
-			Passed:          true,
-			Complete:        true,
-			Risk:            "low",
-		},
-	}
+	// 3. Verify Revocation causes subsequent evaluation DENY
 	b3, _ := json.Marshal(evalReq)
 	req3 := httptest.NewRequest(http.MethodPost, "/api/v1/evaluate", bytes.NewReader(b3))
 	req3.Header.Set("Authorization", "Bearer admin-token")
 	rr3 := httptest.NewRecorder()
 	s.Handler().ServeHTTP(rr3, req3)
 
-	var dec admission.Decision
-	_ = json.Unmarshal(rr3.Body.Bytes(), &dec)
-	if dec.Decision != admission.Deny {
-		t.Fatalf("expected DENY for revoked artifact, got %s", dec.Decision)
+	var dec3 admission.Decision
+	_ = json.Unmarshal(rr3.Body.Bytes(), &dec3)
+	if dec3.Decision != admission.Deny {
+		t.Fatalf("expected DENY for revoked artifact, got %s", dec3.Decision)
 	}
 }

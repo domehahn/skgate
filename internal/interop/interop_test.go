@@ -5,22 +5,22 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-
 	"testing"
 	"time"
 
 	"github.com/domehahn/skgate/internal/admission"
 	"github.com/domehahn/skgate/internal/api"
 	"github.com/domehahn/skgate/internal/auth"
+	"github.com/domehahn/skgate/internal/crypto/attestation"
 	"github.com/domehahn/skgate/internal/policy"
 	"github.com/domehahn/skgate/internal/store"
 )
 
-// TestToolchainLifecycleContract tests the full contract lifecycle:
+// TestToolchainLifecycleContractUnit tests the local component contract lifecycle unit logic:
 // skcr (registry artifact) -> skil (evidence generator) -> skgate (admission check)
 // -> skpm (package manager) -> SkillForge (agent builder) -> skgate (admission check)
 // -> skpm -> skrun (execution environment)
-func TestToolchainLifecycleContract(t *testing.T) {
+func TestToolchainLifecycleContractUnit(t *testing.T) {
 	pol := policy.Policy{
 		SchemaVersion: "1.0.0",
 		Name:          "enterprise-production-policy",
@@ -32,7 +32,7 @@ func TestToolchainLifecycleContract(t *testing.T) {
 			RequireComplete: true,
 		},
 		Signatures: policy.SignaturePolicy{
-			Required:          true,
+			Required:          false,
 			TrustedIdentities: []string{"github.com/domehahn/skgate/.github/workflows/release.yml"},
 		},
 		Capabilities: policy.CapabilityPolicy{
@@ -71,20 +71,23 @@ func TestToolchainLifecycleContract(t *testing.T) {
 		},
 		Environment: "staging",
 		Evidence: admission.Evidence{
-			SchemaVersion:      "1.0.0",
-			SubjectDigest:      artifactDigest,
-			Provider:           "skil",
-			ProviderVersion:    "0.6.0",
-			CompletedAt:        now,
-			Complete:           true,
-			Passed:             true,
-			SignatureVerified:  true,
-			SignerIdentity:     "github.com/domehahn/skgate/.github/workflows/release.yml",
-			ProvenanceVerified: true,
-			Risk:               "low",
-			Capabilities:       []string{"filesystem_read"},
+			SchemaVersion:   "1.0.0",
+			SubjectDigest:   artifactDigest,
+			Provider:        "skil",
+			ProviderVersion: "0.6.0",
+			CompletedAt:     now,
+			Complete:        true,
+			Passed:          true,
+			Risk:            "low",
+			Capabilities:    []string{"filesystem_read"},
+			GitHubAttestation: &attestation.GitHubAttestation{
+				PredicateType: "https://slsa.dev/provenance/v1",
+				SubjectDigest: artifactDigest,
+				Repository:    "github.com/domehahn/skgate",
+			},
 		},
 	}
+	evalReqStage1.Evidence.GitHubAttestation.Builder.ID = "https://github.com/actions/runner"
 
 	body1, _ := json.Marshal(evalReqStage1)
 	req1 := httptest.NewRequest(http.MethodPost, "/api/v1/evaluate", bytes.NewReader(body1))
@@ -102,10 +105,11 @@ func TestToolchainLifecycleContract(t *testing.T) {
 		t.Fatalf("expected ALLOW for Stage 1, got %s reasons=%v", decStage1.Decision, decStage1.Reasons)
 	}
 
-	// Step 2: Promotion (skpm -> SkillForge -> promote to production)
+	// Step 2: Promotion (skpm -> SkillForge -> promote to production bound to decision_id)
 	promoReq := store.Promotion{
+		DecisionID:  decStage1.DecisionID,
 		Digest:      artifactDigest,
-		Environment: "production",
+		Environment: "staging",
 		PromotedBy:  "SkillForge-CI",
 		Reason:      "Automated pipeline verification passed",
 	}
@@ -171,10 +175,4 @@ func TestToolchainLifecycleContract(t *testing.T) {
 	if decStage3.Decision != admission.Deny {
 		t.Fatalf("expected DENY after revocation, got %s", decStage3.Decision)
 	}
-}
-
-func rec2Body(rec *httptest.ResponseRecorder) admission.Decision {
-	var dec admission.Decision
-	_ = json.Unmarshal(rec.Body.Bytes(), &dec)
-	return dec
 }

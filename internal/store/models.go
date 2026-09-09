@@ -8,6 +8,7 @@ import (
 
 type Promotion struct {
 	ID          string    `json:"id"`
+	DecisionID  string    `json:"decision_id"`
 	Digest      string    `json:"digest"`
 	Environment string    `json:"environment"`
 	PromotedBy  string    `json:"promoted_by"`
@@ -33,6 +34,8 @@ type BackupData struct {
 }
 
 type Store interface {
+	Ping() error
+
 	SaveDecision(d admission.Decision) error
 	GetDecisions() ([]admission.Decision, error)
 

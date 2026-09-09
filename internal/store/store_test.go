@@ -31,7 +31,7 @@ func TestFileStoreOperations(t *testing.T) {
 	}
 
 	// 2. Promotions
-	p := Promotion{Digest: d.Subject.Digest, Environment: "prod", PromotedBy: "admin", Reason: "approved"}
+	p := Promotion{DecisionID: d.DecisionID, Digest: d.Subject.Digest, Environment: "prod", PromotedBy: "admin", Reason: "approved"}
 	if err := st.Promote(p); err != nil {
 		t.Fatalf("Promote failed: %v", err)
 	}

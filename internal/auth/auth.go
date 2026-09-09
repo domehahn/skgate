@@ -31,20 +31,23 @@ type JWTHeader struct {
 }
 
 type JWTClaims struct {
-	Issuer    string `json:"iss"`
-	Subject   string `json:"sub"`
-	Audience  string `json:"aud"`
-	Expiry    int64  `json:"exp"`
-	NotBefore int64  `json:"nbf"`
-	IssuedAt  int64  `json:"iat"`
-	Role      Role   `json:"role"`
-	Roles     []Role `json:"roles,omitempty"`
+	Issuer    string   `json:"iss"`
+	Subject   string   `json:"sub"`
+	Audience  string   `json:"aud"`
+	Expiry    int64    `json:"exp"`
+	NotBefore int64    `json:"nbf"`
+	IssuedAt  int64    `json:"iat"`
+	Role      Role     `json:"role"`
+	Roles     []Role   `json:"roles,omitempty"`
 }
 
 type Authenticator struct {
-	apiTokens  map[string]Role
-	hmacSecret []byte
-	rsaKeys    map[string]*rsa.PublicKey
+	apiTokens        map[string]Role
+	hmacSecret       []byte
+	rsaKeys          map[string]*rsa.PublicKey
+	ExpectedIssuer   string
+	ExpectedAudience string
+	ClockSkewLeeway  time.Duration
 }
 
 func NewAuthenticator(token string, secret []byte) *Authenticator {
@@ -53,10 +56,21 @@ func NewAuthenticator(token string, secret []byte) *Authenticator {
 		tokens[token] = RoleAdmin
 	}
 	return &Authenticator{
-		apiTokens:  tokens,
-		hmacSecret: secret,
-		rsaKeys:    make(map[string]*rsa.PublicKey),
+		apiTokens:       tokens,
+		hmacSecret:      secret,
+		rsaKeys:         make(map[string]*rsa.PublicKey),
+		ClockSkewLeeway: 60 * time.Second,
 	}
+}
+
+func (a *Authenticator) WithIssuer(issuer string) *Authenticator {
+	a.ExpectedIssuer = issuer
+	return a
+}
+
+func (a *Authenticator) WithAudience(audience string) *Authenticator {
+	a.ExpectedAudience = audience
+	return a
 }
 
 func (a *Authenticator) RegisterAPIToken(token string, role Role) {
@@ -121,12 +135,22 @@ func (a *Authenticator) ParseJWT(tokenStr string) (*JWTClaims, error) {
 		return nil, errors.New("unmarshal claims failed")
 	}
 
-	now := time.Now().Unix()
-	if claims.Expiry > 0 && now > claims.Expiry {
+	now := time.Now()
+	leewaySec := int64(a.ClockSkewLeeway.Seconds())
+
+	if claims.Expiry > 0 && now.Unix() > claims.Expiry+leewaySec {
 		return nil, errors.New("token expired")
 	}
-	if claims.NotBefore > 0 && now < claims.NotBefore {
+	if claims.NotBefore > 0 && now.Unix() < claims.NotBefore-leewaySec {
 		return nil, errors.New("token not active")
+	}
+
+	// OIDC Claim Validation: Issuer & Audience
+	if a.ExpectedIssuer != "" && claims.Issuer != a.ExpectedIssuer {
+		return nil, fmt.Errorf("token issuer %q does not match expected issuer %q", claims.Issuer, a.ExpectedIssuer)
+	}
+	if a.ExpectedAudience != "" && claims.Audience != a.ExpectedAudience {
+		return nil, fmt.Errorf("token audience %q does not match expected audience %q", claims.Audience, a.ExpectedAudience)
 	}
 
 	signedData := parts[0] + "." + parts[1]
@@ -176,7 +200,6 @@ func HasPermission(userRole Role, requiredRole Role) bool {
 	if userRole == requiredRole {
 		return true
 	}
-	// Permissive hierarchy: Evaluator/Promoter/Auditor have Viewer capabilities
 	if requiredRole == RoleViewer {
 		return true
 	}

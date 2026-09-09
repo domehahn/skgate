@@ -20,6 +20,10 @@ func NewSQLStore(db *sql.DB) (*SQLStore, error) {
 	return &SQLStore{db: db}, nil
 }
 
+func (s *SQLStore) Ping() error {
+	return s.db.Ping()
+}
+
 func (s *SQLStore) SaveDecision(d admission.Decision) error {
 	b, err := json.Marshal(d)
 	if err != nil {
@@ -56,14 +60,42 @@ func (s *SQLStore) GetDecisions() ([]admission.Decision, error) {
 }
 
 func (s *SQLStore) Promote(p Promotion) error {
+	if p.DecisionID == "" {
+		return fmt.Errorf("promotion requires a valid decision_id proving prior ALLOW admission decision")
+	}
+
+	var decRaw string
+	err := s.db.QueryRow("SELECT data FROM decisions WHERE decision_id = $1", p.DecisionID).Scan(&decRaw)
+	if err == sql.ErrNoRows {
+		return fmt.Errorf("decision_id %q not found in decision store", p.DecisionID)
+	}
+	if err != nil {
+		return fmt.Errorf("query decision_id: %w", err)
+	}
+
+	var d admission.Decision
+	if err := json.Unmarshal([]byte(decRaw), &d); err != nil {
+		return fmt.Errorf("unmarshal decision data: %w", err)
+	}
+
+	if d.Decision != admission.Allow {
+		return fmt.Errorf("decision_id %q is %s, promotion requires ALLOW decision", p.DecisionID, d.Decision)
+	}
+	if d.Subject.Digest != p.Digest {
+		return fmt.Errorf("decision digest %s mismatch promotion digest %s", d.Subject.Digest, p.Digest)
+	}
+	if d.Environment != p.Environment {
+		return fmt.Errorf("decision environment %s mismatch promotion environment %s", d.Environment, p.Environment)
+	}
+
 	if p.ID == "" {
 		p.ID = newID("promo")
 	}
 	if p.PromotedAt.IsZero() {
 		p.PromotedAt = time.Now().UTC()
 	}
-	query := `INSERT INTO promotions (id, digest, environment, promoted_by, promoted_at, reason) VALUES ($1, $2, $3, $4, $5, $6)`
-	_, err := s.db.Exec(query, p.ID, p.Digest, p.Environment, p.PromotedBy, p.PromotedAt.UTC(), p.Reason)
+	query := `INSERT INTO promotions (id, decision_id, digest, environment, promoted_by, promoted_at, reason) VALUES ($1, $2, $3, $4, $5, $6, $7)`
+	_, err = s.db.Exec(query, p.ID, p.DecisionID, p.Digest, p.Environment, p.PromotedBy, p.PromotedAt.UTC(), p.Reason)
 	return err
 }
 
@@ -71,9 +103,9 @@ func (s *SQLStore) GetPromotions(env string) ([]Promotion, error) {
 	var rows *sql.Rows
 	var err error
 	if env == "" {
-		rows, err = s.db.Query("SELECT id, digest, environment, promoted_by, promoted_at, COALESCE(reason, '') FROM promotions ORDER BY promoted_at ASC")
+		rows, err = s.db.Query("SELECT id, COALESCE(decision_id, ''), digest, environment, promoted_by, promoted_at, COALESCE(reason, '') FROM promotions ORDER BY promoted_at ASC")
 	} else {
-		rows, err = s.db.Query("SELECT id, digest, environment, promoted_by, promoted_at, COALESCE(reason, '') FROM promotions WHERE environment = $1 ORDER BY promoted_at ASC", env)
+		rows, err = s.db.Query("SELECT id, COALESCE(decision_id, ''), digest, environment, promoted_by, promoted_at, COALESCE(reason, '') FROM promotions WHERE environment = $1 ORDER BY promoted_at ASC", env)
 	}
 	if err != nil {
 		return nil, err
@@ -83,7 +115,7 @@ func (s *SQLStore) GetPromotions(env string) ([]Promotion, error) {
 	var list []Promotion
 	for rows.Next() {
 		var p Promotion
-		if err := rows.Scan(&p.ID, &p.Digest, &p.Environment, &p.PromotedBy, &p.PromotedAt, &p.Reason); err != nil {
+		if err := rows.Scan(&p.ID, &p.DecisionID, &p.Digest, &p.Environment, &p.PromotedBy, &p.PromotedAt, &p.Reason); err != nil {
 			return nil, err
 		}
 		list = append(list, p)
@@ -182,7 +214,7 @@ func (s *SQLStore) Restore(data []byte) error {
 		}
 	}
 	for _, p := range backup.Promotions {
-		if _, err := tx.Exec("INSERT INTO promotions (id, digest, environment, promoted_by, promoted_at, reason) VALUES ($1, $2, $3, $4, $5, $6)", p.ID, p.Digest, p.Environment, p.PromotedBy, p.PromotedAt.UTC(), p.Reason); err != nil {
+		if _, err := tx.Exec("INSERT INTO promotions (id, decision_id, digest, environment, promoted_by, promoted_at, reason) VALUES ($1, $2, $3, $4, $5, $6, $7)", p.ID, p.DecisionID, p.Digest, p.Environment, p.PromotedBy, p.PromotedAt.UTC(), p.Reason); err != nil {
 			return err
 		}
 	}

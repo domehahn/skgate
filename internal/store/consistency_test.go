@@ -45,7 +45,7 @@ func TestMultiReplicaConsistency(t *testing.T) {
 				}
 
 				if i%2 == 0 {
-					if err := st.Promote(Promotion{Digest: digest, Environment: "production", PromotedBy: "ci"}); err != nil {
+					if err := st.Promote(Promotion{DecisionID: dec.DecisionID, Digest: digest, Environment: "production", PromotedBy: "ci"}); err != nil {
 						t.Errorf("replica %d Promote failed: %v", replicaID, err)
 					}
 				}

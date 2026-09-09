@@ -37,6 +37,7 @@ CREATE TABLE IF NOT EXISTS decisions (
 
 CREATE TABLE IF NOT EXISTS promotions (
     id VARCHAR(128) PRIMARY KEY,
+    decision_id VARCHAR(128),
     digest VARCHAR(128) NOT NULL,
     environment VARCHAR(64) NOT NULL,
     promoted_by VARCHAR(256) NOT NULL,

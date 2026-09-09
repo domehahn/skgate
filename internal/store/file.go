@@ -35,6 +35,20 @@ func NewFileStore(dataDir string) (*FileStore, error) {
 	}, nil
 }
 
+func (fs *FileStore) Ping() error {
+	fs.mu.RLock()
+	defer fs.mu.RUnlock()
+	if _, err := os.Stat(fs.dataDir); err != nil {
+		return fmt.Errorf("data directory unavailable: %w", err)
+	}
+	probe := filepath.Join(fs.dataDir, ".ping-probe")
+	if err := os.WriteFile(probe, []byte("ok"), 0o600); err != nil {
+		return fmt.Errorf("data directory write check failed: %w", err)
+	}
+	_ = os.Remove(probe)
+	return nil
+}
+
 func (fs *FileStore) SaveDecision(d admission.Decision) error {
 	fs.mu.Lock()
 	defer fs.mu.Unlock()
@@ -50,6 +64,37 @@ func (fs *FileStore) GetDecisions() ([]admission.Decision, error) {
 func (fs *FileStore) Promote(p Promotion) error {
 	fs.mu.Lock()
 	defer fs.mu.Unlock()
+
+	if p.DecisionID == "" {
+		return fmt.Errorf("promotion requires a valid decision_id proving prior ALLOW admission decision")
+	}
+
+	decs, err := readNDJSON[admission.Decision](fs.decisions)
+	if err != nil {
+		return fmt.Errorf("read decisions for promotion check: %w", err)
+	}
+
+	var validDecision *admission.Decision
+	for _, d := range decs {
+		if d.DecisionID == p.DecisionID {
+			validDecision = &d
+			break
+		}
+	}
+
+	if validDecision == nil {
+		return fmt.Errorf("decision_id %q not found in decision store", p.DecisionID)
+	}
+	if validDecision.Decision != admission.Allow {
+		return fmt.Errorf("decision_id %q is %s, promotion requires ALLOW decision", p.DecisionID, validDecision.Decision)
+	}
+	if validDecision.Subject.Digest != p.Digest {
+		return fmt.Errorf("decision digest %s mismatch promotion digest %s", validDecision.Subject.Digest, p.Digest)
+	}
+	if validDecision.Environment != p.Environment {
+		return fmt.Errorf("decision environment %s mismatch promotion environment %s", validDecision.Environment, p.Environment)
+	}
+
 	if p.ID == "" {
 		p.ID = newID("promo")
 	}
