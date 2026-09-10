@@ -30,7 +30,7 @@ func New(e admission.Evaluator, st store.Store, token string, production bool, l
 	}
 	authenticator := auth.NewAuthenticator(token, nil)
 	return &Server{
-		evaluator:     e.WithRevocations(st),
+		evaluator:     e.WithRevocations(st).WithQuarantines(st),
 		store:         st,
 		authenticator: authenticator,
 		production:    production,
@@ -62,6 +62,13 @@ func (s *Server) Handler() http.Handler {
 			_, _ = w.Write([]byte(fmt.Sprintf("not ready: policy invalid: %v\n", err)))
 			return
 		}
+		if s.production && s.authenticator != nil {
+			if err := s.authenticator.ValidateReadiness(); err != nil {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				_, _ = w.Write([]byte(fmt.Sprintf("not ready: auth error: %v\n", err)))
+				return
+			}
+		}
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ready\n"))
 	})
@@ -74,6 +81,10 @@ func (s *Server) Handler() http.Handler {
 
 	mux.Handle("POST /api/v1/revocations", s.requireRole(auth.RoleAdmin, http.HandlerFunc(s.revoke)))
 	mux.Handle("GET /api/v1/revocations", s.requireRole(auth.RoleViewer, http.HandlerFunc(s.getRevocations)))
+
+	mux.Handle("POST /api/v1/quarantines", s.requireRole(auth.RoleSecurityReviewer, http.HandlerFunc(s.quarantine)))
+	mux.Handle("GET /api/v1/quarantines", s.requireRole(auth.RoleViewer, http.HandlerFunc(s.getQuarantines)))
+	mux.Handle("DELETE /api/v1/quarantines", s.requireRole(auth.RoleSecurityReviewer, http.HandlerFunc(s.unquarantine)))
 
 	mux.Handle("GET /api/v1/decisions", s.requireRole(auth.RoleAuditor, http.HandlerFunc(s.getDecisions)))
 
@@ -191,6 +202,49 @@ func (s *Server) getRevocations(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, list)
+}
+
+func (s *Server) quarantine(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	var q store.Quarantine
+	if err := json.NewDecoder(r.Body).Decode(&q); err != nil {
+		writeErr(w, 400, "SKGATE-QUARANTINE-INVALID", err.Error())
+		return
+	}
+	if q.Digest == "" {
+		writeErr(w, 400, "SKGATE-QUARANTINE-INVALID", "digest is required")
+		return
+	}
+	if err := s.store.Quarantine(q); err != nil {
+		writeErr(w, 500, "SKGATE-QUARANTINE-FAILED", err.Error())
+		return
+	}
+	s.logger.Info("audit event", "action", "quarantine", "digest", q.Digest, "environment", q.Environment, "incident_id", q.IncidentID)
+	writeJSON(w, 201, q)
+}
+
+func (s *Server) getQuarantines(w http.ResponseWriter, r *http.Request) {
+	env := r.URL.Query().Get("environment")
+	list, err := s.store.GetQuarantines(env)
+	if err != nil {
+		writeErr(w, 500, "SKGATE-QUARANTINES-FAILED", err.Error())
+		return
+	}
+	writeJSON(w, 200, list)
+}
+
+func (s *Server) unquarantine(w http.ResponseWriter, r *http.Request) {
+	id := r.URL.Query().Get("id")
+	if id == "" {
+		writeErr(w, 400, "SKGATE-UNQUARANTINE-INVALID", "id or digest parameter is required")
+		return
+	}
+	if err := s.store.Unquarantine(id); err != nil {
+		writeErr(w, 500, "SKGATE-UNQUARANTINE-FAILED", err.Error())
+		return
+	}
+	s.logger.Info("audit event", "action", "unquarantine", "target", id)
+	writeJSON(w, 200, map[string]string{"status": "unquarantined", "target": id})
 }
 
 func (s *Server) getDecisions(w http.ResponseWriter, r *http.Request) {

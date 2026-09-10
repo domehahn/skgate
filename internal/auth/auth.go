@@ -17,11 +17,12 @@ import (
 type Role string
 
 const (
-	RoleAdmin     Role = "admin"
-	RoleEvaluator Role = "evaluator"
-	RolePromoter  Role = "promoter"
-	RoleAuditor   Role = "auditor"
-	RoleViewer    Role = "viewer"
+	RoleAdmin            Role = "admin"
+	RoleSecurityReviewer Role = "security-reviewer"
+	RoleEvaluator        Role = "evaluator"
+	RolePromoter         Role = "promoter"
+	RoleAuditor          Role = "auditor"
+	RoleViewer           Role = "viewer"
 )
 
 type JWTHeader struct {
@@ -31,14 +32,14 @@ type JWTHeader struct {
 }
 
 type JWTClaims struct {
-	Issuer    string   `json:"iss"`
-	Subject   string   `json:"sub"`
-	Audience  string   `json:"aud"`
-	Expiry    int64    `json:"exp"`
-	NotBefore int64    `json:"nbf"`
-	IssuedAt  int64    `json:"iat"`
-	Role      Role     `json:"role"`
-	Roles     []Role   `json:"roles,omitempty"`
+	Issuer    string `json:"iss"`
+	Subject   string `json:"sub"`
+	Audience  string `json:"aud"`
+	Expiry    int64  `json:"exp"`
+	NotBefore int64  `json:"nbf"`
+	IssuedAt  int64  `json:"iat"`
+	Role      Role   `json:"role"`
+	Roles     []Role `json:"roles,omitempty"`
 }
 
 type Authenticator struct {
@@ -71,6 +72,22 @@ func (a *Authenticator) WithIssuer(issuer string) *Authenticator {
 func (a *Authenticator) WithAudience(audience string) *Authenticator {
 	a.ExpectedAudience = audience
 	return a
+}
+
+func (a *Authenticator) WithJWKS(jwks *JWKSKeySet) *Authenticator {
+	if jwks != nil {
+		for kid, key := range jwks.Keys() {
+			a.rsaKeys[kid] = key
+		}
+	}
+	return a
+}
+
+func (a *Authenticator) ValidateReadiness() error {
+	if len(a.apiTokens) == 0 && len(a.hmacSecret) == 0 && len(a.rsaKeys) == 0 {
+		return errors.New("no auth mechanisms (API tokens, HMAC secret, or RSA/JWKS keys) configured")
+	}
+	return nil
 }
 
 func (a *Authenticator) RegisterAPIToken(token string, role Role) {
@@ -198,6 +215,9 @@ func HasPermission(userRole Role, requiredRole Role) bool {
 		return true
 	}
 	if userRole == requiredRole {
+		return true
+	}
+	if userRole == RoleSecurityReviewer && (requiredRole == RoleEvaluator || requiredRole == RolePromoter || requiredRole == RoleAuditor || requiredRole == RoleViewer) {
 		return true
 	}
 	if requiredRole == RoleViewer {

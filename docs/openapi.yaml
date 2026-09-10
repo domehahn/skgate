@@ -1,0 +1,232 @@
+openapi: 3.0.3
+info:
+  title: skgate API
+  description: Agent Skill Admission & Governance Plane API
+  version: 1.0.0
+servers:
+  - url: http://localhost:8081
+    description: Local skgate server
+paths:
+  /healthz:
+    get:
+      summary: Liveness Probe
+      responses:
+        '200':
+          description: OK
+  /readyz:
+    get:
+      summary: Readiness Probe
+      description: Checks storage connectivity, database schema migrations, and policy validity
+      responses:
+        '200':
+          description: Server Ready
+        '503':
+          description: Server Not Ready
+  /metrics:
+    get:
+      summary: Prometheus Metrics
+      responses:
+        '200':
+          description: Metrics text format
+  /api/v1/evaluate:
+    post:
+      summary: Evaluate Skill Artifact Admission
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EvaluationRequest'
+      responses:
+        '200':
+          description: Admission Decision
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Decision'
+        '400':
+          description: Bad Request
+        '401':
+          description: Unauthorized
+        '500':
+          description: Internal Error
+  /api/v1/promotions:
+    post:
+      summary: Record Artifact Promotion
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Promotion'
+      responses:
+        '201':
+          description: Promotion Recorded
+    get:
+      summary: List Promotions
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: query
+          name: environment
+          schema:
+            type: string
+      responses:
+        '200':
+          description: List of Promotions
+  /api/v1/revocations:
+    post:
+      summary: Revoke Artifact Digest
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Revocation'
+      responses:
+        '201':
+          description: Revocation Recorded
+    get:
+      summary: List Revocations
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: query
+          name: environment
+          schema:
+            type: string
+      responses:
+        '200':
+          description: List of Revocations
+  /api/v1/quarantines:
+    post:
+      summary: Quarantine Artifact Digest
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Quarantine'
+      responses:
+        '201':
+          description: Quarantine Recorded
+    get:
+      summary: List Quarantines
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: query
+          name: environment
+          schema:
+            type: string
+      responses:
+        '200':
+          description: List of Quarantines
+    delete:
+      summary: Unquarantine Artifact Digest or ID
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: query
+          name: id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Unquarantined
+  /api/v1/decisions:
+    get:
+      summary: List Admission Decisions (Audit Trail)
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: List of Decisions
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  schemas:
+    EvaluationRequest:
+      type: object
+      required:
+        - subject
+        - environment
+        - evidence
+      properties:
+        subject:
+          type: object
+          properties:
+            name: { type: string }
+            version: { type: string }
+            digest: { type: string }
+        environment: { type: string }
+        evidence:
+          type: object
+    Decision:
+      type: object
+      properties:
+        schema_version: { type: string }
+        decision_id: { type: string }
+        decision: { type: string, enum: [ALLOW, DENY, REVIEW_REQUIRED, REASSESS_REQUIRED] }
+        environment: { type: string }
+        policy_name: { type: string }
+        policy_digest: { type: string }
+        evaluated_at: { type: string, format: date-time }
+        issuer: { type: string }
+        signature: { type: string }
+        reasons:
+          type: array
+          items:
+            type: object
+            properties:
+              code: { type: string }
+              message: { type: string }
+    Promotion:
+      type: object
+      required:
+        - decision_id
+        - digest
+        - environment
+      properties:
+        id: { type: string }
+        decision_id: { type: string }
+        digest: { type: string }
+        environment: { type: string }
+        promoted_by: { type: string }
+        promoted_at: { type: string, format: date-time }
+        reason: { type: string }
+    Revocation:
+      type: object
+      required:
+        - digest
+      properties:
+        id: { type: string }
+        digest: { type: string }
+        environment: { type: string }
+        revoked_by: { type: string }
+        revoked_at: { type: string, format: date-time }
+        reason: { type: string }
+    Quarantine:
+      type: object
+      required:
+        - digest
+      properties:
+        id: { type: string }
+        digest: { type: string }
+        environment: { type: string }
+        quarantined_by: { type: string }
+        quarantined_at: { type: string, format: date-time }
+        reason: { type: string }
+        incident_id: { type: string }

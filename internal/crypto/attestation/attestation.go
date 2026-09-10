@@ -13,6 +13,9 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
+
+	"github.com/domehahn/skgate/internal/trust"
 )
 
 type DSSESignature struct {
@@ -45,12 +48,30 @@ type GitHubAttestation struct {
 	SubjectDigest string `json:"subjectDigest"`
 	Repository    string `json:"repository"`
 	Workflow      string `json:"workflow"`
+	Certificate   string `json:"certificate,omitempty"`
 }
 
-type Verifier struct{}
+type Verifier struct {
+	TrustRoots *trust.TrustRoots
+}
 
 func NewVerifier() *Verifier {
-	return &Verifier{}
+	return &Verifier{
+		TrustRoots: trust.NewTrustRoots(),
+	}
+}
+
+func NewVerifierWithRoots(tr *trust.TrustRoots) *Verifier {
+	return &Verifier{
+		TrustRoots: tr,
+	}
+}
+
+func (v *Verifier) WithTrustRoots(tr *trust.TrustRoots) *Verifier {
+	if tr != nil {
+		v.TrustRoots = tr
+	}
+	return v
 }
 
 // VerifyDSSE verifies a Dead Simple Signing Envelope against a PEM-encoded public key.
@@ -100,6 +121,19 @@ func (v *Verifier) VerifySigstore(bundle SigstoreBundle, artifactDigest string, 
 		if parseErr != nil {
 			return fmt.Errorf("parse x509 cert: %w", parseErr)
 		}
+		now := time.Now()
+		if now.Before(cert.NotBefore) || now.After(cert.NotAfter) {
+			return errors.New("certificate is expired or not yet valid")
+		}
+		if v.TrustRoots != nil && v.TrustRoots.FulcioRoots != nil {
+			opts := x509.VerifyOptions{
+				Roots:     v.TrustRoots.FulcioRoots,
+				KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageAny},
+			}
+			if _, verifyErr := cert.Verify(opts); verifyErr != nil {
+				return fmt.Errorf("certificate failed trust root chain verification: %w", verifyErr)
+			}
+		}
 		pubKey = cert.PublicKey
 		if len(cert.EmailAddresses) > 0 {
 			certIdentities = append(certIdentities, cert.EmailAddresses...)
@@ -142,21 +176,53 @@ func (v *Verifier) VerifySigstore(bundle SigstoreBundle, artifactDigest string, 
 		return fmt.Errorf("sigstore signature verification failed: %w", err)
 	}
 
-	if len(trustedIdentities) > 0 && len(certIdentities) > 0 {
+	if len(trustedIdentities) > 0 {
+		if len(certIdentities) == 0 {
+			return errors.New("trusted_identities policy specified but no x509 SAN certificate identities present in bundle")
+		}
 		matched := false
 		for _, certId := range certIdentities {
 			for _, trustedId := range trustedIdentities {
-				if certId == trustedId {
+				if matchIdentity(certId, trustedId) {
 					matched = true
 					break
 				}
 			}
+			if matched {
+				break
+			}
 		}
 		if !matched {
-			return fmt.Errorf("sigstore signer identity %v not in trusted identities list", certIdentities)
+			return fmt.Errorf("sigstore signer identity %v not in trusted identities list %v", certIdentities, trustedIdentities)
 		}
 	}
 	return nil
+}
+
+func matchIdentity(certId, trustedId string) bool {
+	if certId == trustedId {
+		return true
+	}
+	if strings.HasSuffix(trustedId, "*") {
+		prefix := strings.TrimSuffix(trustedId, "*")
+		if strings.HasPrefix(certId, prefix) {
+			return true
+		}
+	}
+	if ok, _ := pathMatch(trustedId, certId); ok {
+		return true
+	}
+	return false
+}
+
+func pathMatch(pattern, name string) (bool, error) {
+	if strings.Contains(pattern, "*") {
+		parts := strings.Split(pattern, "*")
+		if len(parts) == 2 {
+			return strings.HasPrefix(name, parts[0]) && strings.HasSuffix(name, parts[1]), nil
+		}
+	}
+	return pattern == name, nil
 }
 
 // VerifyGitHubAttestation verifies in-toto GitHub provenance assertions.
@@ -166,6 +232,25 @@ func (v *Verifier) VerifyGitHubAttestation(att GitHubAttestation, expectedDigest
 	}
 	if att.Builder.ID == "" && att.Repository == "" {
 		return errors.New("attestation missing builder id and repository")
+	}
+	if att.Certificate != "" {
+		block, _ := pem.Decode([]byte(att.Certificate))
+		if block == nil {
+			return errors.New("invalid github attestation certificate PEM")
+		}
+		cert, err := x509.ParseCertificate(block.Bytes)
+		if err != nil {
+			return fmt.Errorf("parse github attestation certificate: %w", err)
+		}
+		opts := x509.VerifyOptions{
+			CurrentTime: time.Now(),
+		}
+		if v.TrustRoots != nil && v.TrustRoots.GitHubAttestationRoots != nil {
+			opts.Roots = v.TrustRoots.GitHubAttestationRoots
+		}
+		if _, err := cert.Verify(opts); err != nil {
+			return fmt.Errorf("github attestation certificate chain verification failed: %w", err)
+		}
 	}
 	return nil
 }

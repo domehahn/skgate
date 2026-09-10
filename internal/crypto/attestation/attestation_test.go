@@ -97,3 +97,12 @@ func TestGitHubAttestation(t *testing.T) {
 		t.Fatalf("VerifyGitHubAttestation failed: %v", err)
 	}
 }
+
+func TestSigstoreGlobMatching(t *testing.T) {
+	if !matchIdentity("https://github.com/domehahn/skgate/.github/workflows/release.yml@refs/heads/main", "https://github.com/domehahn/*") {
+		t.Fatal("expected glob match for domehahn repository")
+	}
+	if matchIdentity("https://github.com/malicious/repo", "https://github.com/domehahn/*") {
+		t.Fatal("expected glob match failure for malicious repository")
+	}
+}

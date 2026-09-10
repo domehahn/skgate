@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/domehahn/skgate/internal/crypto/attestation"
+	"github.com/domehahn/skgate/internal/crypto/signing"
 	"github.com/domehahn/skgate/internal/digest"
 	"github.com/domehahn/skgate/internal/policy"
 	"github.com/domehahn/skgate/internal/semver"
@@ -26,11 +27,17 @@ type RevocationChecker interface {
 	IsRevoked(digest, env string) (bool, error)
 }
 
+type QuarantineChecker interface {
+	IsQuarantined(digest, env string) (bool, error)
+}
+
 type Evaluator struct {
 	Policy      policy.Policy
 	Revocations RevocationChecker
+	Quarantines QuarantineChecker
 	Now         func() time.Time
 	Verifier    *attestation.Verifier
+	Signer      *signing.DecisionSigner
 }
 
 func New(p policy.Policy) Evaluator {
@@ -46,6 +53,16 @@ func (e Evaluator) WithRevocations(rc RevocationChecker) Evaluator {
 	return e
 }
 
+func (e Evaluator) WithQuarantines(qc QuarantineChecker) Evaluator {
+	e.Quarantines = qc
+	return e
+}
+
+func (e Evaluator) WithSigner(s *signing.DecisionSigner) Evaluator {
+	e.Signer = s
+	return e
+}
+
 func (e Evaluator) Evaluate(req EvaluationRequest) Decision {
 	now := e.Now().UTC()
 	d := Decision{
@@ -56,6 +73,7 @@ func (e Evaluator) Evaluate(req EvaluationRequest) Decision {
 		PolicyName:    e.Policy.Name,
 		PolicyDigest:  policyDigest(e.Policy),
 		EvaluatedAt:   now,
+		ExpiresAt:     now.Add(24 * time.Hour),
 		Decision:      Allow,
 	}
 	deny := func(code, msg string) { d.Decision = Deny; d.Reasons = append(d.Reasons, Reason{code, msg}) }
@@ -86,6 +104,16 @@ func (e Evaluator) Evaluate(req EvaluationRequest) Decision {
 			deny("SKGATE-REVOCATION-STATE-UNAVAILABLE", fmt.Sprintf("cannot determine revocation status: %v", err))
 		} else if revoked {
 			deny("SKGATE-DIGEST-REVOKED", "artifact digest has been revoked for this environment")
+		}
+	}
+
+	// Check Quarantine Status - FAIL CLOSED if storage/lookup fails
+	if e.Quarantines != nil {
+		quarantined, err := e.Quarantines.IsQuarantined(req.Subject.Digest, req.Environment)
+		if err != nil {
+			deny("SKGATE-QUARANTINE-STATE-UNAVAILABLE", fmt.Sprintf("cannot determine quarantine status: %v", err))
+		} else if quarantined {
+			deny("SKGATE-DIGEST-QUARANTINED", "artifact digest is quarantined in this environment")
 		}
 	}
 
@@ -151,21 +179,52 @@ func (e Evaluator) Evaluate(req EvaluationRequest) Decision {
 		if slices.Contains(e.Policy.Capabilities.Deny, cap) {
 			deny("SKGATE-CAPABILITY-DENIED", "capability denied by policy: "+cap)
 		}
-		if slices.Contains(e.Policy.Capabilities.ApprovalRequired, cap) && !slices.Contains(req.Approvals, cap) {
-			review("SKGATE-APPROVAL-REQUIRED", "approval required for capability: "+cap)
+		if slices.Contains(e.Policy.Capabilities.ApprovalRequired, cap) {
+			approved := slices.Contains(req.Approvals, cap)
+			if !approved {
+				for _, rec := range req.ApprovalRecords {
+					if rec.Capability == cap && rec.SubjectDigest == req.Subject.Digest {
+						if rec.Environment == "" || rec.Environment == req.Environment {
+							if rec.ExpiresAt.IsZero() || now.Before(rec.ExpiresAt) {
+								approved = true
+								break
+							}
+						}
+					}
+				}
+			}
+			if !approved {
+				review("SKGATE-APPROVAL-REQUIRED", "approval required for capability: "+cap)
+			}
 		}
 	}
 	if d.Decision == Allow {
 		d.RuntimePolicy = &RuntimePolicy{
-			SchemaVersion:       "1.0.0",
-			ArtifactDigest:      req.Subject.Digest,
-			AllowedCommands:     append([]string(nil), e.Policy.Runtime.AllowedCommands...),
-			AllowedSecrets:      append([]string(nil), e.Policy.Runtime.AllowedSecrets...),
-			AllowWorkspaceWrite: e.Policy.Runtime.AllowWorkspaceWrite,
-			AllowNetwork:        e.Policy.Runtime.AllowNetwork,
-			TimeoutSeconds:      e.Policy.Runtime.TimeoutSeconds,
-			MaxOutputBytes:      e.Policy.Runtime.MaxOutputBytes,
+			SchemaVersion:   "1.0.0",
+			ArtifactDigest:  req.Subject.Digest,
+			DecisionID:      d.DecisionID,
+			Environment:     req.Environment,
+			PolicyDigest:    d.PolicyDigest,
+			IssuedAt:        now,
+			ExpiresAt:       now.Add(24 * time.Hour),
+			AllowedCommands: append([]string(nil), e.Policy.Runtime.AllowedCommands...),
+			Filesystem: FilesystemConstraints{
+				AllowWrite: e.Policy.Runtime.AllowWorkspaceWrite,
+			},
+			Network: NetworkConstraints{
+				AllowNetwork: e.Policy.Runtime.AllowNetwork,
+			},
+			AllowedSecrets: append([]string(nil), e.Policy.Runtime.AllowedSecrets...),
+			ResourceLimits: ResourceLimits{
+				TimeoutSeconds: e.Policy.Runtime.TimeoutSeconds,
+				MaxOutputBytes: e.Policy.Runtime.MaxOutputBytes,
+			},
 		}
+	}
+	if e.Signer != nil {
+		d.Issuer = e.Signer.Issuer()
+		d.KeyID = e.Signer.KeyID()
+		d.Signature = e.Signer.Sign(d.DecisionID, d.Subject.Digest, d.Environment, d.Decision)
 	}
 	if len(d.Reasons) == 0 {
 		d.Reasons = []Reason{{Code: "SKGATE-ALLOW", Message: "all admission requirements satisfied"}}

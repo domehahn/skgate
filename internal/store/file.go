@@ -21,6 +21,7 @@ type FileStore struct {
 	decisions   string
 	promotions  string
 	revocations string
+	quarantines string
 }
 
 func NewFileStore(dataDir string) (*FileStore, error) {
@@ -32,6 +33,7 @@ func NewFileStore(dataDir string) (*FileStore, error) {
 		decisions:   filepath.Join(dataDir, "decisions.ndjson"),
 		promotions:  filepath.Join(dataDir, "promotions.ndjson"),
 		revocations: filepath.Join(dataDir, "revocations.ndjson"),
+		quarantines: filepath.Join(dataDir, "quarantines.ndjson"),
 	}, nil
 }
 
@@ -93,6 +95,31 @@ func (fs *FileStore) Promote(p Promotion) error {
 	}
 	if validDecision.Environment != p.Environment {
 		return fmt.Errorf("decision environment %s mismatch promotion environment %s", validDecision.Environment, p.Environment)
+	}
+	if !validDecision.ExpiresAt.IsZero() && time.Now().After(validDecision.ExpiresAt) {
+		return fmt.Errorf("decision_id %q has expired at %s", p.DecisionID, validDecision.ExpiresAt.Format(time.RFC3339))
+	}
+
+	// Check revocation status for promotion target digest and environment
+	allRevs, err := readNDJSON[Revocation](fs.revocations)
+	if err != nil {
+		return fmt.Errorf("read revocations for promotion check: %w", err)
+	}
+	for _, r := range allRevs {
+		if r.Digest == p.Digest && (r.Environment == "" || r.Environment == p.Environment) {
+			return fmt.Errorf("digest %s is revoked in environment %q, promotion denied", p.Digest, p.Environment)
+		}
+	}
+
+	// Check quarantine status for promotion target digest and environment
+	allQuars, err := readNDJSON[Quarantine](fs.quarantines)
+	if err != nil {
+		return fmt.Errorf("read quarantines for promotion check: %w", err)
+	}
+	for _, q := range allQuars {
+		if q.Digest == p.Digest && (q.Environment == "" || q.Environment == p.Environment) {
+			return fmt.Errorf("digest %s is quarantined in environment %q, promotion denied", p.Digest, p.Environment)
+		}
 	}
 
 	if p.ID == "" {
@@ -167,6 +194,72 @@ func (fs *FileStore) IsRevoked(digest, env string) (bool, error) {
 	return false, nil
 }
 
+func (fs *FileStore) Quarantine(q Quarantine) error {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	if q.ID == "" {
+		q.ID = newID("quar")
+	}
+	if q.QuarantinedAt.IsZero() {
+		q.QuarantinedAt = time.Now().UTC()
+	}
+	return appendNDJSON(fs.quarantines, q)
+}
+
+func (fs *FileStore) GetQuarantines(env string) ([]Quarantine, error) {
+	fs.mu.RLock()
+	defer fs.mu.RUnlock()
+	all, err := readNDJSON[Quarantine](fs.quarantines)
+	if err != nil {
+		return nil, err
+	}
+	if env == "" {
+		return all, nil
+	}
+	var filtered []Quarantine
+	for _, item := range all {
+		if item.Environment == "" || item.Environment == env {
+			filtered = append(filtered, item)
+		}
+	}
+	return filtered, nil
+}
+
+func (fs *FileStore) IsQuarantined(digest, env string) (bool, error) {
+	quars, err := fs.GetQuarantines(env)
+	if err != nil {
+		return false, err
+	}
+	for _, q := range quars {
+		if q.Digest == digest && (q.Environment == "" || q.Environment == env) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (fs *FileStore) Unquarantine(id string) error {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	all, err := readNDJSON[Quarantine](fs.quarantines)
+	if err != nil {
+		return err
+	}
+	var remaining []Quarantine
+	for _, q := range all {
+		if q.ID != id && q.Digest != id {
+			remaining = append(remaining, q)
+		}
+	}
+	_ = os.Remove(fs.quarantines)
+	for _, q := range remaining {
+		if err := appendNDJSON(fs.quarantines, q); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (fs *FileStore) Backup() ([]byte, error) {
 	fs.mu.RLock()
 	defer fs.mu.RUnlock()
@@ -183,6 +276,10 @@ func (fs *FileStore) Backup() ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read revocations for backup: %w", err)
 	}
+	quars, err := readNDJSON[Quarantine](fs.quarantines)
+	if err != nil {
+		return nil, fmt.Errorf("read quarantines for backup: %w", err)
+	}
 
 	backup := BackupData{
 		SchemaVersion: "1.0.0",
@@ -190,6 +287,7 @@ func (fs *FileStore) Backup() ([]byte, error) {
 		Decisions:     decs,
 		Promotions:    proms,
 		Revocations:   revs,
+		Quarantines:   quars,
 	}
 	return json.MarshalIndent(backup, "", "  ")
 }
@@ -206,6 +304,7 @@ func (fs *FileStore) Restore(data []byte) error {
 	_ = os.Remove(fs.decisions)
 	_ = os.Remove(fs.promotions)
 	_ = os.Remove(fs.revocations)
+	_ = os.Remove(fs.quarantines)
 
 	for _, d := range backup.Decisions {
 		if err := appendNDJSON(fs.decisions, d); err != nil {
@@ -219,6 +318,11 @@ func (fs *FileStore) Restore(data []byte) error {
 	}
 	for _, r := range backup.Revocations {
 		if err := appendNDJSON(fs.revocations, r); err != nil {
+			return err
+		}
+	}
+	for _, q := range backup.Quarantines {
+		if err := appendNDJSON(fs.quarantines, q); err != nil {
 			return err
 		}
 	}

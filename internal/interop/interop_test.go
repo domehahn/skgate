@@ -175,4 +175,32 @@ func TestToolchainLifecycleContractUnit(t *testing.T) {
 	if decStage3.Decision != admission.Deny {
 		t.Fatalf("expected DENY after revocation, got %s", decStage3.Decision)
 	}
+
+	// Step 6: Quarantine API verification
+	quarReq := store.Quarantine{
+		Digest:        artifactDigest,
+		Environment:   "production",
+		QuarantinedBy: "SecOps",
+		Reason:        "Active incident isolation",
+		IncidentID:    "INC-2026-001",
+	}
+	bodyQuar, _ := json.Marshal(quarReq)
+	reqQuar := httptest.NewRequest(http.MethodPost, "/api/v1/quarantines", bytes.NewReader(bodyQuar))
+	reqQuar.Header.Set("Authorization", "Bearer skgate-token-prod")
+	recQuar := httptest.NewRecorder()
+	handler.ServeHTTP(recQuar, reqQuar)
+
+	if recQuar.Code != http.StatusCreated {
+		t.Fatalf("Quarantine API failed with status %d: %s", recQuar.Code, recQuar.Body.String())
+	}
+
+	// Step 7: Unquarantine API verification
+	reqUnquar := httptest.NewRequest(http.MethodDelete, "/api/v1/quarantines?id="+artifactDigest, nil)
+	reqUnquar.Header.Set("Authorization", "Bearer skgate-token-prod")
+	recUnquar := httptest.NewRecorder()
+	handler.ServeHTTP(recUnquar, reqUnquar)
+
+	if recUnquar.Code != http.StatusOK {
+		t.Fatalf("Unquarantine API failed with status %d: %s", recUnquar.Code, recUnquar.Body.String())
+	}
 }

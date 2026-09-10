@@ -123,3 +123,24 @@ func TestPromotionAndRevocationAPIs(t *testing.T) {
 		t.Fatalf("expected DENY for revoked artifact, got %s", dec3.Decision)
 	}
 }
+
+func TestReadyzHealthProbe(t *testing.T) {
+	p := policy.Policy{
+		SchemaVersion: "1.0.0",
+		Name:          "p",
+		Environments:  []string{"prod"},
+		Assurance:     policy.AssurancePolicy{Provider: "skil", MinimumVersion: "0.6.0"},
+		Risk:          policy.RiskPolicy{Maximum: "low"},
+		Runtime:       policy.RuntimePolicy{TimeoutSeconds: 1, MaxOutputBytes: 1},
+	}
+	st, _ := store.NewFileStore(t.TempDir())
+	s := New(admission.New(p), st, "admin-token", true, slog.New(slog.NewTextHandler(os.Stderr, nil)))
+
+	req := httptest.NewRequest(http.MethodGet, "/readyz", nil)
+	rr := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK for /readyz, got %d body=%s", rr.Code, rr.Body.String())
+	}
+}

@@ -196,3 +196,43 @@ func TestRevokedDigest(t *testing.T) {
 		t.Fatalf("expected SKGATE-DIGEST-REVOKED reason code, got %v", d.Reasons)
 	}
 }
+
+type mockQuarantineChecker struct {
+	quarantined bool
+	err         error
+}
+
+func (m mockQuarantineChecker) IsQuarantined(digest, env string) (bool, error) {
+	if m.err != nil {
+		return false, m.err
+	}
+	return m.quarantined, nil
+}
+
+func TestQuarantineEnforcement(t *testing.T) {
+	now := time.Now()
+	r := baseReq(now)
+	e := New(basePolicy()).WithQuarantines(mockQuarantineChecker{quarantined: true})
+	e.Now = func() time.Time { return now }
+	d := e.Evaluate(r)
+	if d.Decision != Deny {
+		t.Fatalf("expected DENY for quarantined digest, got %s", d.Decision)
+	}
+	if len(d.Reasons) == 0 || d.Reasons[0].Code != "SKGATE-DIGEST-QUARANTINED" {
+		t.Fatalf("expected SKGATE-DIGEST-QUARANTINED reason code, got %v", d.Reasons)
+	}
+}
+
+func TestQuarantineUnavailableFailsClosed(t *testing.T) {
+	now := time.Now()
+	r := baseReq(now)
+	e := New(basePolicy()).WithQuarantines(mockQuarantineChecker{err: errors.New("quarantine DB offline")})
+	e.Now = func() time.Time { return now }
+	d := e.Evaluate(r)
+	if d.Decision != Deny {
+		t.Fatalf("expected DENY when quarantine check fails, got %s", d.Decision)
+	}
+	if len(d.Reasons) == 0 || d.Reasons[0].Code != "SKGATE-QUARANTINE-STATE-UNAVAILABLE" {
+		t.Fatalf("expected SKGATE-QUARANTINE-STATE-UNAVAILABLE reason code, got %v", d.Reasons)
+	}
+}

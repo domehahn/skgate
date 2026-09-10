@@ -14,6 +14,10 @@ type SQLStore struct {
 }
 
 func NewSQLStore(db *sql.DB) (*SQLStore, error) {
+	db.SetMaxOpenConns(25)
+	db.SetMaxIdleConns(5)
+	db.SetConnMaxLifetime(15 * time.Minute)
+
 	if err := Migrate(db); err != nil {
 		return nil, fmt.Errorf("run schema migrations: %w", err)
 	}
@@ -86,6 +90,25 @@ func (s *SQLStore) Promote(p Promotion) error {
 	}
 	if d.Environment != p.Environment {
 		return fmt.Errorf("decision environment %s mismatch promotion environment %s", d.Environment, p.Environment)
+	}
+	if !d.ExpiresAt.IsZero() && time.Now().After(d.ExpiresAt) {
+		return fmt.Errorf("decision_id %q has expired at %s", p.DecisionID, d.ExpiresAt.Format(time.RFC3339))
+	}
+
+	revoked, err := s.IsRevoked(p.Digest, p.Environment)
+	if err != nil {
+		return fmt.Errorf("check revocation for promotion: %w", err)
+	}
+	if revoked {
+		return fmt.Errorf("digest %s is revoked in environment %q, promotion denied", p.Digest, p.Environment)
+	}
+
+	quarantined, err := s.IsQuarantined(p.Digest, p.Environment)
+	if err != nil {
+		return fmt.Errorf("check quarantine for promotion: %w", err)
+	}
+	if quarantined {
+		return fmt.Errorf("digest %s is quarantined in environment %q, promotion denied", p.Digest, p.Environment)
 	}
 
 	if p.ID == "" {
@@ -169,6 +192,57 @@ func (s *SQLStore) IsRevoked(digest, env string) (bool, error) {
 	return count > 0, nil
 }
 
+func (s *SQLStore) Quarantine(q Quarantine) error {
+	if q.ID == "" {
+		q.ID = newID("quar")
+	}
+	if q.QuarantinedAt.IsZero() {
+		q.QuarantinedAt = time.Now().UTC()
+	}
+	query := `INSERT INTO quarantines (id, digest, environment, quarantined_by, quarantined_at, reason, incident_id) VALUES ($1, $2, $3, $4, $5, $6, $7)`
+	_, err := s.db.Exec(query, q.ID, q.Digest, q.Environment, q.QuarantinedBy, q.QuarantinedAt.UTC(), q.Reason, q.IncidentID)
+	return err
+}
+
+func (s *SQLStore) GetQuarantines(env string) ([]Quarantine, error) {
+	var rows *sql.Rows
+	var err error
+	if env == "" {
+		rows, err = s.db.Query("SELECT id, digest, environment, quarantined_by, quarantined_at, COALESCE(reason, ''), COALESCE(incident_id, '') FROM quarantines ORDER BY quarantined_at ASC")
+	} else {
+		rows, err = s.db.Query("SELECT id, digest, environment, quarantined_by, quarantined_at, COALESCE(reason, ''), COALESCE(incident_id, '') FROM quarantines WHERE environment = '' OR environment = $1 ORDER BY quarantined_at ASC", env)
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var list []Quarantine
+	for rows.Next() {
+		var q Quarantine
+		if err := rows.Scan(&q.ID, &q.Digest, &q.Environment, &q.QuarantinedBy, &q.QuarantinedAt, &q.Reason, &q.IncidentID); err != nil {
+			return nil, err
+		}
+		list = append(list, q)
+	}
+	return list, rows.Err()
+}
+
+func (s *SQLStore) IsQuarantined(digest, env string) (bool, error) {
+	var count int
+	query := `SELECT COUNT(*) FROM quarantines WHERE digest = $1 AND (environment = '' OR environment = $2)`
+	err := s.db.QueryRow(query, digest, env).Scan(&count)
+	if err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
+func (s *SQLStore) Unquarantine(id string) error {
+	_, err := s.db.Exec("DELETE FROM quarantines WHERE id = $1 OR digest = $1", id)
+	return err
+}
+
 func (s *SQLStore) Backup() ([]byte, error) {
 	decs, err := s.GetDecisions()
 	if err != nil {
@@ -182,12 +256,17 @@ func (s *SQLStore) Backup() ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	quars, err := s.GetQuarantines("")
+	if err != nil {
+		return nil, err
+	}
 	backup := BackupData{
 		SchemaVersion: "1.0.0",
 		ExportedAt:    time.Now().UTC(),
 		Decisions:     decs,
 		Promotions:    proms,
 		Revocations:   revs,
+		Quarantines:   quars,
 	}
 	return json.MarshalIndent(backup, "", "  ")
 }
@@ -204,7 +283,7 @@ func (s *SQLStore) Restore(data []byte) error {
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	if _, err := tx.Exec("DELETE FROM decisions; DELETE FROM promotions; DELETE FROM revocations;"); err != nil {
+	if _, err := tx.Exec("DELETE FROM decisions; DELETE FROM promotions; DELETE FROM revocations; DELETE FROM quarantines;"); err != nil {
 		return err
 	}
 	for _, d := range backup.Decisions {
@@ -220,6 +299,11 @@ func (s *SQLStore) Restore(data []byte) error {
 	}
 	for _, r := range backup.Revocations {
 		if _, err := tx.Exec("INSERT INTO revocations (id, digest, environment, revoked_by, revoked_at, reason) VALUES ($1, $2, $3, $4, $5, $6)", r.ID, r.Digest, r.Environment, r.RevokedBy, r.RevokedAt.UTC(), r.Reason); err != nil {
+			return err
+		}
+	}
+	for _, q := range backup.Quarantines {
+		if _, err := tx.Exec("INSERT INTO quarantines (id, digest, environment, quarantined_by, quarantined_at, reason, incident_id) VALUES ($1, $2, $3, $4, $5, $6, $7)", q.ID, q.Digest, q.Environment, q.QuarantinedBy, q.QuarantinedAt.UTC(), q.Reason, q.IncidentID); err != nil {
 			return err
 		}
 	}

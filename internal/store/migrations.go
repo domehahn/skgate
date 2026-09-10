@@ -59,6 +59,23 @@ CREATE INDEX IF NOT EXISTS idx_promotions_digest ON promotions(digest, environme
 CREATE INDEX IF NOT EXISTS idx_revocations_digest ON revocations(digest, environment);
 `,
 	},
+	{
+		Version: 2,
+		Name:    "quarantines_schema",
+		SQL: `
+CREATE TABLE IF NOT EXISTS quarantines (
+    id VARCHAR(128) PRIMARY KEY,
+    digest VARCHAR(128) NOT NULL,
+    environment VARCHAR(64) NOT NULL,
+    quarantined_by VARCHAR(256) NOT NULL,
+    quarantined_at TIMESTAMP WITH TIME ZONE NOT NULL,
+    reason TEXT,
+    incident_id VARCHAR(128)
+);
+
+CREATE INDEX IF NOT EXISTS idx_quarantines_digest ON quarantines(digest, environment);
+`,
+	},
 }
 
 func Migrate(db *sql.DB) error {
@@ -68,8 +85,8 @@ func Migrate(db *sql.DB) error {
 			return err
 		}
 		var count int
-		_ = tx.QueryRow("SELECT COUNT(*) FROM schema_migrations WHERE version = $1", m.Version).Scan(&count)
-		if count > 0 {
+		err = tx.QueryRow("SELECT COUNT(*) FROM schema_migrations WHERE version = $1", m.Version).Scan(&count)
+		if err == nil && count > 0 {
 			_ = tx.Rollback()
 			continue
 		}
